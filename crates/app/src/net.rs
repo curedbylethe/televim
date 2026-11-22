@@ -3691,7 +3691,21 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
     if app.wants_older() {
         return Wanted::Page(FetchDirection::Older, cursor);
     }
-    if app.wants_newer() {
+    // A window drawn from the store is waiting to hear what came after it, and
+    // the wait is not the reader's to hold up: the view pinned to the newest
+    // stored message is exactly the reader the missing stretch matters to, so
+    // the confirming page is asked for wherever the reader is scrolled. The
+    // other guards are [`App::wants_newer`]'s, for the reason it gives. The
+    // wait is cleared — not kept — by the page that reaches the end of the
+    // run, so a window that has heard the end falls through to the
+    // reader-driven ask below.
+    let window = &app.conversation.conversation.window;
+    if (app.tail_unconfirmed() || app.wants_newer())
+        && !app.is_fetching(FetchDirection::Newer)
+        && !app.is_fetching(FetchDirection::Latest)
+        && !window.is_empty()
+        && !window.exhausted_newer
+    {
         return Wanted::Page(FetchDirection::Newer, cursor);
     }
 
@@ -6907,6 +6921,10 @@ fn apply_ready_to_screen_with_archive(
         (state.history.cursor, state.history.jump) = (None, None);
         (state.history.retry_at, state.history.retry_peer) = (None, None);
         app.conversation.conversation.window.exhausted_older = false;
+        // The wire's "nothing newer" is the gone feed's answer: this client
+        // brings a new one, whose run may have grown past the stored newest,
+        // so the direction is asked about again rather than settled forever.
+        app.conversation.conversation.window.exhausted_newer = false;
         // A window drawn from the store is the run to resume: its newest row is
         // the newest stored id. Anchor the fresh cursor there so the next pass
         // asks only for what came after it, never a newest page over rows we
@@ -6923,6 +6941,11 @@ fn apply_ready_to_screen_with_archive(
             let mut cursor = HistoryCursor::new(app.conversation.conversation.window.chat_id);
             cursor.reset_to(&windows_messages);
             state.history.cursor = Some(cursor);
+            // The cache's word that a run is current was a word about the old
+            // feed, and it does not cross a bring-up either: the window waits
+            // for the new feed's confirming page again, so its missing tail is
+            // asked for wherever the reader is scrolled.
+            app.resume_unconfirmed();
         }
         app.set_archived_chats(archived);
         app.refresh_chats(chats)
@@ -13729,16 +13752,101 @@ mod tests {
     }
 
     /// The common tail of every bring-up: the `Ready` lands over the stored
-    /// window, and the only page asked for follows its newest id.
+    /// window, untouched by any key, and the only page asked for follows its
+    /// newest id.
     fn assert_resume_asks_newer(app: &mut App, state: &mut State) {
         ready(app, state, vec![chat(CHAT)]);
-        scroll_up(app, 1);
         let mut cursor = HistoryCursor::new(CHAT);
         cursor.reset_to(&messages(CHAT, 1..=30));
         assert_eq!(
             wanted(app, state.history, Instant::now()),
             Wanted::Page(FetchDirection::Newer, cursor),
             "the bring-up asks after the stored newest id, never a newest page"
+        );
+    }
+
+    /// A launch that drew the window from the store asks for what came after
+    /// it without being touched: the view pinned to the newest stored row is
+    /// exactly the reader the missing stretch matters to, and the tail is
+    /// confirmed wherever they are scrolled.
+    #[test]
+    fn an_untouched_launch_asks_for_the_missing_tail() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=30);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+        assert!(
+            app.conversation.conversation.auto_follow(),
+            "the view is pinned to the bottom, the way a launch leaves it"
+        );
+
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=30));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "no scroll was needed to ask for what came after the store's run"
+        );
+    }
+
+    /// A reconnect after the tail was confirmed still resumes: the wait is
+    /// over, but where the window came from did not change, so the fresh
+    /// cursor is anchored at the window's newest row rather than the
+    /// conversation being reloaded from the wire.
+    #[test]
+    fn a_reconnect_after_the_tail_is_confirmed_still_resumes() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=30);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+
+        // The forward page reaches the end of the run: the wait ends, the
+        // window grows to 1..=50, and it is still the store's rows extended.
+        let mut landed = HistoryCursor::new(CHAT);
+        landed.reset_to(&messages(CHAT, 41..=50));
+        landed.note_newer(10, Some(50), PAGE);
+        let generation = state.feed_generation;
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Newer,
+                anchor: Some(30),
+                cursor: landed,
+                generation,
+                result: Ok(history_page(messages(CHAT, 41..=50))),
+            },
+        );
+        assert!(
+            !app.tail_unconfirmed(),
+            "the confirming page ended the wait"
+        );
+        assert!(
+            app.window_is_cached(),
+            "the window is still the store's run"
+        );
+        assert!(
+            app.conversation.conversation.window.exhausted_newer,
+            "the old feed's answer settled the direction"
+        );
+
+        // A later bring-up over the same window re-anchors rather than
+        // reloading it, and the new feed is not trusted on the old one's
+        // word: the wait restarts, the stale settlement does not keep it
+        // from being asked about what came after the stored newest id.
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+        assert!(
+            app.tail_unconfirmed(),
+            "the fresh feed has not confirmed the window yet"
+        );
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=50));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "the reconnect asks after the confirmed newest id, never a newest page"
         );
     }
 

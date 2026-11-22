@@ -174,8 +174,8 @@ pub struct ConversationState {
     /// [`select_chat_none`]: crate::state::coordinate::select_chat_none
     pub playback: PlaybackState,
 
-    /// Whether the window on show came from the local cache rather than from the
-    /// wire.
+    /// Whether the window on show came from the local cache and is still
+    /// waiting for the wire to confirm what came after it.
     ///
     /// A flag beside the view rather than a property of the messages, because
     /// what it records is where the window as a whole came from: a cached message
@@ -184,10 +184,22 @@ pub struct ConversationState {
     /// the newest page that replaces it, or the forward page that reaches the
     /// end of a run resumed from the store.
     ///
-    /// It never stands for an answer. Nothing that decides what to fetch reads
-    /// it, so a cached window is asked about exactly as an empty one is, and a
-    /// revalidation that fails is reported as any other failed page is.
+    /// It never stands for an answer, and it is not the whole provenance
+    /// either: [`Self::from_store`] outlives it, because where the rows came
+    /// from does not change when the wire confirms them. A revalidation that
+    /// fails is reported as any other failed page is, and leaves this set.
     pub(crate) cached: bool,
+
+    /// Whether the window on show was drawn from the store, confirmed or not.
+    ///
+    /// Set by [`Self::seed`] alongside [`Self::cached`], and cleared only by
+    /// [`Self::open_conversation`] and [`Self::apply_latest`], which replace the
+    /// window outright — the wire's page is not a resume. Everything after the
+    /// seed extends the store's rows, so the window stays a stored run and
+    /// a later bring-up resumes from its newest row rather than asking for a
+    /// newest page over rows it already holds. It is a fetch decision, so
+    /// unlike [`Self::cached`] it survives confirmation.
+    pub(crate) from_store: bool,
 
     /// Each laid-out message's wrap, as byte ranges of its display body, keyed
     /// by message identifier.
@@ -224,6 +236,7 @@ impl ConversationState {
             downloads: Downloads::default(),
             playback: PlaybackState::default(),
             cached: false,
+            from_store: false,
             row_stash: RefCell::new(HashMap::new()),
             translation_target: "en".to_owned(),
         }
@@ -236,6 +249,7 @@ impl ConversationState {
     pub(crate) fn open_conversation(&mut self, chat_id: i64) {
         self.conversation = ConversationView::new(chat_id);
         self.cached = false;
+        self.from_store = false;
         // A pin list is about the chat it was opened in, so it goes with the one
         // being left rather than listing another's rows; so is a revision list,
         // and its journal has gone with the view it belonged to.
@@ -537,6 +551,7 @@ impl ConversationState {
         // The server's newest page is the answer a cached window was waiting
         // for, and it has replaced every row the cache put there.
         self.cached = false;
+        self.from_store = false;
         self.selection = None;
         self.vim.set_total(self.conversation.window.len());
         self.conversation.follow();
@@ -556,9 +571,10 @@ impl ConversationState {
     ///
     /// Laid out exactly as the newest page is, through [`Self::apply_latest`]:
     /// the cache holds the end of the conversation, so the reader is put at its
-    /// newest message and the view follows. The page the window is waiting for is
-    /// not touched — it is still wanted, still in flight if it was, and it
-    /// replaces these rows when it lands.
+    /// newest message and the view follows. The page the window is waiting for
+    /// is not touched — it is still wanted, still in flight if it was. A newest
+    /// page replaces these rows when it lands; a forward page extends them,
+    /// and the one that reaches the end of the run confirms them.
     ///
     /// Reports whether anything was shown.
     pub(crate) fn seed(&mut self, chat_id: i64, messages: Vec<Message>) -> bool {
@@ -571,6 +587,7 @@ impl ConversationState {
 
         let seeded = self.apply_latest(messages);
         self.cached = seeded;
+        self.from_store = seeded;
         seeded
     }
 
