@@ -5,6 +5,58 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.17.0] - 2026-11-22
+
+### Added
+
+- **app:** Store messages in a sealed per-record archive
+- **app:** Record and fetch only the ranges a conversation lacks
+- **app:** Bound the archive without deleting what is stored
+- **app:** Resume an open conversation from the store instead of reloading it
+
+### Fixed
+
+- **app:** Keep every stored message when the window saves
+- **app:** Refuse to write over an archive that could not be read
+- **app:** Re-seal the archive only when every row moved
+- **app:** Re-seal the archive key instead of rewriting every row
+- **app:** Archive fetched pages, keep deletions and bound the load
+- **app:** Keep the archive read, edited and recoverable
+- **app:** Leave the gap below a stored range to the wire
+- **app:** Let a page read pick the range that holds its rows
+- **app:** Refuse a history write failure from another account
+- **app:** Keep the queued pages of a failed final write
+- **app:** Write pages and the window in one transaction
+- **app:** Serve stored pages before honoring the full-archive refusal
+- **telegram-framework:** Flush a session file before renaming it into place
+- **app:** Keep the wire cursor open after a short stored page
+- **app:** Retry and report a history write that fails at shutdown
+- **app:** Keep the new passphrase when only the session's directory sync failed
+- **app:** Load only the newest recorded stretch of a chat on restart
+- **app:** Archive the page a jump downloads
+- **app:** Read the archive-full answer again after a write lands
+- **app:** Seal only the window rows a save changed
+- **app:** Preserve unreadable history archives
+- **app:** Reload history after unlocking
+- **app:** Count archived text during writes
+- **app:** Resume older paging after reconnect
+- **app:** Keep archive pages on their own cursor
+- **design:** Model the archive full status
+- **app:** Preserve window range in older archives
+- **app:** Recover interrupted archive creation
+- **app:** Update archive status on transitions
+- **app:** Archive pages after changing chats
+- **app:** Read older archive pages off the loop
+- **app:** Distinguish session durability failures
+- **app:** Avoid rewriting saved archive updates
+- **app:** Preserve adjacent ledgerless records
+- **app:** Join older pages, miss failed reads, guard jump answers
+- **app:** Sweep legacy media temp files at launch
+- **app:** Ask for a stored run's missing tail wherever the reader is
+- **app:** Serve the stored forward stretch before asking the wire
+- **app:** Hold live arrivals over an unconfirmed stored window
+- **app:** Send the read marker a resumed open owes
+
 ## [0.16.0] - 2026-11-20
 
 ### Added
