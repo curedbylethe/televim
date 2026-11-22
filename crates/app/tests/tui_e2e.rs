@@ -305,7 +305,7 @@ fn scrolling_up_and_down_moves_the_visible_slice() {
 fn an_arrival_scrolls_a_pinned_view() {
     let sandbox = common::sandbox();
     seeded_chat(&sandbox);
-    let mut t = common::spawn_offline_with_scenario(&sandbox, "arrival 1 41 msg41");
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "confirm\narrival 1 41 msg41");
     open_conversation(&mut t);
     t.wait_until(|s| s.contains("Conversation (40/40)"))
         .expect("the conversation opens pinned to the newest message");
@@ -336,7 +336,7 @@ fn an_arrival_scrolls_a_pinned_view() {
 fn an_arrival_leaves_a_scrolled_back_view_alone() {
     let sandbox = common::sandbox();
     seeded_chat(&sandbox);
-    let mut t = common::spawn_offline_with_scenario(&sandbox, "arrival 1 41 msg41");
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "confirm\narrival 1 41 msg41");
     open_conversation(&mut t);
 
     t.send(Key::Ctrl('u')).expect("scroll up");

@@ -9,6 +9,7 @@ use domain::history::ConversationView;
 use domain::message::{MediaKind, Message, MessageStatus};
 use domain::search::SearchState;
 use domain::selection::{Mark, Selection};
+use domain::updates::UpdateEvent;
 use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 
@@ -201,6 +202,15 @@ pub struct ConversationState {
     /// unlike [`Self::cached`] it survives confirmation.
     pub(crate) from_store: bool,
 
+    /// Live arrivals held back because the window on show is [`Self::cached`]
+    /// and they land beyond its newest row.
+    ///
+    /// An arrival shown there would stand past a hole: the stretch between
+    /// the stored newest row and the arrival is what the forward page is on
+    /// its way to fill. The held messages are replayed when that page — or a
+    /// newest page — lands, and dropped when another conversation is opened.
+    pub(crate) live_held: Vec<Message>,
+
     /// Each laid-out message's wrap, as byte ranges of its display body, keyed
     /// by message identifier.
     ///
@@ -237,6 +247,7 @@ impl ConversationState {
             playback: PlaybackState::default(),
             cached: false,
             from_store: false,
+            live_held: Vec::new(),
             row_stash: RefCell::new(HashMap::new()),
             translation_target: "en".to_owned(),
         }
@@ -250,6 +261,7 @@ impl ConversationState {
         self.conversation = ConversationView::new(chat_id);
         self.cached = false;
         self.from_store = false;
+        self.live_held.clear();
         // A pin list is about the chat it was opened in, so it goes with the one
         // being left rather than listing another's rows; so is a revision list,
         // and its journal has gone with the view it belonged to.
@@ -548,6 +560,7 @@ impl ConversationState {
         }
 
         self.conversation.window.replace(page);
+        self.replay_held();
         // The server's newest page is the answer a cached window was waiting
         // for, and it has replaced every row the cache put there.
         self.cached = false;
@@ -613,20 +626,62 @@ impl ConversationState {
     /// Puts messages behind what the window holds: a fetched page, or one the
     /// reader has just typed.
     ///
-    /// Reports whether anything was added.
+    /// Reports whether anything was added. An empty page adds nothing itself,
+    /// but a confirming one — the wire's answer that nothing follows the run —
+    /// still replays what the feed delivered while the window waited, so those
+    /// arrivals are not stranded behind a page that brought no rows.
     pub(crate) fn apply_newer(&mut self, page: Vec<Message>) -> bool {
-        if !self.page_belongs_to_open_chat(&page) {
+        if !page.is_empty() && !self.page_belongs_to_open_chat(&page) {
             return false;
         }
 
         let anchor = self.cursor_message_id();
-        if !self.conversation.window.push_back(page) {
+        let added = self.conversation.window.push_back(page);
+        let replayed = self.replay_held();
+        if !added && !replayed {
             return false;
         }
 
         self.after_window_change(anchor);
 
         true
+    }
+
+    /// Whether a live arrival is held back rather than shown.
+    ///
+    /// An unconfirmed stored window ends at the newest row the store had; an
+    /// arrival beyond it would stand past a hole until the forward page fills
+    /// the stretch between. The arrival is kept for that page instead — held,
+    /// not lost: the list still records it, and it is replayed when the page
+    /// lands.
+    pub(crate) fn holds_arrival(&mut self, message: &Message) -> bool {
+        if !self.cached
+            || message.chat_id != self.conversation.window.chat_id
+            || Some(message.id) <= self.conversation.window.newest_id()
+        {
+            return false;
+        }
+        self.live_held.push(message.clone());
+        true
+    }
+
+    /// Appends what the feed delivered while the window was unconfirmed.
+    ///
+    /// Called when a page has landed, so the hole the held arrivals stood
+    /// beyond is filled or the window has been replaced outright. The window
+    /// drops an arrival it already holds, so a page that carried the same
+    /// message is not doubled. Reports whether any held arrival landed.
+    fn replay_held(&mut self) -> bool {
+        let held = std::mem::take(&mut self.live_held);
+        let mut landed = false;
+        for message in held {
+            let _ = self
+                .conversation
+                .window
+                .apply_event(&UpdateEvent::NewMessage(message));
+            landed = true;
+        }
+        landed
     }
 
     /// Puts the reader back where they were, now that the window has moved.

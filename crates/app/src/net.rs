@@ -13979,6 +13979,59 @@ mod tests {
         );
     }
 
+    /// A live arrival over an unconfirmed stored window is held back rather
+    /// than shown past a hole: the forward page that confirms the run lands
+    /// first, and the held arrival joins the window contiguous with it.
+    #[test]
+    fn an_arrival_over_an_unconfirmed_window_waits_for_the_page_that_confirms_it() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 91..=100);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+        assert!(app.tail_unconfirmed(), "the stored window is not confirmed");
+
+        // A live arrival lands beyond the stored newest id, before the forward
+        // page has filled the stretch up to it.
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 151..=151).remove(0))),
+        );
+        assert_eq!(
+            window_ids(&app).last(),
+            Some(&100),
+            "the arrival is not shown past a hole"
+        );
+
+        // The confirming forward page fills the run, and the held arrival
+        // joins it: one stretch, no gap, the wait over.
+        let mut landed = HistoryCursor::new(CHAT);
+        landed.reset_to(&messages(CHAT, 91..=100));
+        landed.note_newer(50, Some(150), PAGE);
+        let generation = state.feed_generation;
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Newer,
+                anchor: Some(100),
+                cursor: landed,
+                generation,
+                result: Ok(history_page(messages(CHAT, 101..=150))),
+            },
+        );
+        assert_eq!(
+            window_ids(&app),
+            (91..=151).collect::<Vec<i64>>(),
+            "page and held arrival are one contiguous run"
+        );
+        assert!(
+            !app.tail_unconfirmed(),
+            "the page that reached the end confirms the window"
+        );
+    }
+
     /// A reader with a stored window, connected and ready to be brought back
     /// up. All three entry points end at the same `Ready`, so the forward
     /// request is asserted once for each of them below.

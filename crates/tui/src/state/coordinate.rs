@@ -713,6 +713,14 @@ pub(crate) fn apply_update(
     }
 
     let anchor = conversation.cursor_message_id();
+    // An arrival beyond an unconfirmed stored window would stand past a hole:
+    // it is held for the forward page on its way to fill the stretch, and the
+    // list still records it either way.
+    if let UpdateEvent::NewMessage(message) = event
+        && conversation.holds_arrival(message)
+    {
+        return listed;
+    }
     let windowed = conversation.conversation.apply_event(event);
     if windowed {
         conversation.after_window_change(anchor);
