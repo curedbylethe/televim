@@ -132,8 +132,13 @@ impl HistoryCursor {
     }
 
     /// Records a page that was appended, and whether it was short.
+    ///
+    /// The forward counterpart to [`Self::note_older`], and public for the
+    /// same reason it is: the fetches move a cursor, and so does the archive's
+    /// forward serve, which has to leave the cursor pointing above what it
+    /// appended or the wire would download the same rows again.
     #[cfg(any(feature = "live", test))]
-    fn note_newer(&mut self, raw_count: usize, newest_id: Option<i64>, requested: usize) {
+    pub fn note_newer(&mut self, raw_count: usize, newest_id: Option<i64>, requested: usize) {
         if let Some(newest) = newest_id {
             self.newest_loaded_id = Some(newest);
         }

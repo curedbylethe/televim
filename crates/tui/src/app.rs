@@ -2737,9 +2737,25 @@ impl App {
         self.conversation.seed(chat_id, messages)
     }
 
-    /// Whether the window on show was drawn from the store rather than the wire.
+    /// Whether the window on show was drawn from the store, confirmed or not.
+    ///
+    /// Reads the provenance flag rather than the wait, so a window whose
+    /// forward page confirmed it still counts: it is a stored run, and the
+    /// next bring-up resumes from its newest row instead of asking for a
+    /// newest page over rows the store already holds.
     #[must_use]
     pub fn window_is_cached(&self) -> bool {
+        self.conversation.from_store
+    }
+
+    /// Whether the window on show came from the store and the wire has not yet
+    /// confirmed what came after it.
+    ///
+    /// Reads the wait rather than the provenance, so it clears when the
+    /// confirming page lands — and stays set when a revalidation fails, which
+    /// is what a failed fetch over a cached window is reported as.
+    #[must_use]
+    pub fn tail_unconfirmed(&self) -> bool {
         self.conversation.cached
     }
 
@@ -2763,6 +2779,16 @@ impl App {
     /// it, it did not replace it.
     pub fn tail_confirmed(&mut self) {
         self.conversation.cached = false;
+    }
+
+    /// Puts a store-drawn window back to waiting for the wire's confirmation.
+    ///
+    /// The confirmation the old feed gave it does not cross a bring-up: this
+    /// client brings a new feed, whose run may have grown past the stored
+    /// newest, so the window is asked about again rather than trusted. Where
+    /// the rows came from did not change, so the provenance flag stays set.
+    pub fn resume_unconfirmed(&mut self) {
+        self.conversation.cached = true;
     }
 
     /// Puts a page in front of what the window holds.
