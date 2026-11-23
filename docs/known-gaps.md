@@ -231,9 +231,9 @@ Real, and named so they are not mistaken for oversights:
   measured ([`memory.md`](./memory.md)) on three processes: the harness (60 chats
   and a drawn screen, none of the network half), the binary with an empty chat
   list, and, since the seeded scenario, the binary with a sealed 60-chat cache
-  loaded (`rss_idle_populated_binary_bytes`, 8.062 MB median of five runs, 125
-  samples between 4.328 and 8.094 MB). That last one is the real program drawing a
-  real list, launched credential-free so it builds no client. What is still not
+  loaded (`rss_idle_populated_binary_bytes`, 8.062 MB median of five runs; 125
+  raw samples ranged from 1.891 to 10.781 MB). That last one is the real program
+  drawing a real list, launched credential-free so it builds no client. What is still not
   taken is a session connected to Telegram with fetched history, because
   `make measure` drops every `TELEVIM_*` and `TELEGRAM_*` credential name on
   purpose. The allocator question itself is closed rather than open: the global
