@@ -779,10 +779,11 @@ re-opened verification copy at once; the ignored test
 `cargo test -p televim --release --all-features --bin televim cache_worst_case --
 --include-ignored --nocapture --test-threads=1`) read a **60.4 MB write peak and
 62.7 MB load peak** against a 9.8 MB baseline — above the 50 MB budget, and the
-follow-up was recorded in [`known-gaps.md`](./known-gaps.md). Re-run on the
-archive at stage 04 on this host (Darwin `arm64`): encoded text 8,371,200 B,
-serialised payload 8,735,744 B (1.04x), baseline RSS 10.1 MB, **write peak
-46.2 MB and load peak 46.5 MB**. Both are inside the 50 MB budget, so that gap is
+follow-up was recorded in [`known-gaps.md`](./known-gaps.md). Two archive runs
+at commit `37c74423236c534ca520b883baca95a23487ec86` on this host (Darwin
+`arm64`) each measured encoded text 8,371,200 B, serialised payload 8,736,833 B
+(1.04x), baseline RSS 10.2 MB, **write peak 48.0 MB and load peak 48.4 MB**.
+Both are inside the 50 MB budget, so that gap is
 closed; the whole-buffer clone and its escaping blow-up are gone with the
 whole-file write. The remaining peak is the test's passphrase provider and its
 19 MiB Argon2id derivation (the production file-key provider derives nothing),
