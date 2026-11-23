@@ -698,7 +698,7 @@ keeps one 8-byte fingerprint per window row to tell them apart: about 6,400 ×
 | Archive, per conversation | a few MB | one conversation may hold the whole limit |
 | Archive, total | 3.29 MB (6,400 rows, 801,144 text bytes) | `history_limit_bytes` of text plus sealed-record and SQLite overhead per row |
 | Resident page cache | 256 KiB | 256 KiB, pinned; `mmap_size=0` |
-| A write, briefly | one transaction | 46.2 MB process peak (see below) |
+| A write, briefly | one transaction | 48.0 MB process peak (see below) |
 
 Disk per chat has no separate bound: a single conversation can occupy the whole
 limit. The limit counts message text only; the file also carries a sealed
@@ -783,8 +783,10 @@ follow-up was recorded as a known gap. Two archive runs
 at commit `37c74423236c534ca520b883baca95a23487ec86` on this host (Darwin
 `arm64`) each measured encoded text 8,371,200 B, serialised payload 8,736,833 B
 (1.04x), baseline RSS 10.2 MB, **write peak 48.0 MB and load peak 48.4 MB**.
-Both are inside the 50 MB budget, so that gap is closed. Per-record sealing
-removed the whole-file envelope and its re-opened verification copy. The encoder
+Two further runs at `8dd07176b1a7e04257de265ab6d1f597898f940b` measured
+47.9 and 48.0 MB write peaks and 48.3 and 48.4 MB load peaks, respectively.
+All write peaks are inside the 50 MB budget, so that gap is closed. Per-record
+sealing removed the whole-file envelope and its re-opened verification copy. The encoder
 still clones the cache collections into a snapshot, then serialises it for the
 writer thread; the whole-file escaping blow-up is gone. The remaining peak is
 the test's passphrase provider and its
