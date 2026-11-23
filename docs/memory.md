@@ -28,16 +28,17 @@ That is a host settling, not a regression, so the latency anchors stay: moving
 one on three noisy runs is what the bands exist to prevent, and they keep
 enforcing until a clean-host run confirms.
 
-### Re-recorded for the 0.5.0 tree (five runs)
+### Re-recorded for the `e7131d6` tree (five runs)
 
 `docs/memory-baseline.json` was re-recorded by hand with
-`scripts/memory/check.py --record-baseline docs/memory-baseline.json` from five
-`make measure` reports, taken on 2026-10-16 on the one host (`Darwin arm64`,
-Darwin 27.0.0, `rustc 1.98.1`, `Cargo.lock` sha256 `3b50c3d51f6df991…`, recorded
-as matching the tree). The recorder takes the median across the five reports, and
-each report is already the median of five launches per metric; this is a
-maintainer decision with its reasons written here, not something the driver does.
-The previous baseline (99d0d8b, three runs) was taken on this same host after the
+`scripts/memory/check.py --record-baseline docs/memory-baseline.json --report target/memory-report-run-1.json target/memory-report-run-2.json target/memory-report-run-3.json target/memory-report-run-4.json target/memory-report-run-5.json`
+from five `make measure` reports taken at `e7131d6` on 2026-11-23 on the one
+host (`Darwin arm64`, Darwin 27.0.0, `rustc 1.98.1`, `Cargo.lock` sha256
+`909a0a7821fa0fec…`, recorded as matching the tree). The recorder takes the
+median across the five reports, and each report is already the median of five
+launches per metric; this is a maintainer decision with its reasons written
+here, not something the driver does. The earlier 0.5.0 re-record (three runs at
+`99d0d8b`, then five runs for the archive) was taken on this same host after the
 Darwin 25.5.0 → 27.0.0 move.
 
 **Why.** (1) `make measure-check` failed on binary size: the stripped release
@@ -86,18 +87,21 @@ other band are unchanged. The new
 spread rather than an injected regression (an RSS regression cannot be injected
 the way a sleep or a static can); see its `why` in `thresholds.json`.
 
-**Stage 04 re-record.** The archive changed the binary and the seeded figure, so
-the baseline was re-recorded from five runs on this host and both bands that no
-longer described it were re-derived from those runs. The binary-size baseline is
-now 9,428,464 B (was 7,071,040 B in the stored file): `rusqlite` bundled and the
-store's own code, measured at stage 01 as +1,762,736 B over a 7,632,640 B
-baseline. The populated figure is bimodal here — 8.078 / 8.016 / 33.797 / 15.406 /
-8.000 MB, median 8.078 MB, raw samples 7.984–33.906 MB — because the seeded
-scenario's passphrase provider pays a 19 MiB Argon2id derivation whose transient
-is sometimes still resident at the idle sample; the production file-key path
-derives nothing. Its band is now 3.5x / 3.0 MB (threshold 36.35 MB), which clears
-both modes and every sample rather than failing two of the five runs that set
-it. Every other band kept its shape; its numbers are the new baseline below.
+**Stage 04 re-record (refreshed at `e7131d6`).** The archive changed the binary
+and the seeded figure, and subsequent merges on `main` moved the binary and
+`Cargo.lock` again, so the baseline was re-recorded from five runs at `e7131d6`
+on this host (`2026-11-23`, `Cargo.lock` sha256 `909a0a7821fa0fec…`). The
+binary-size baseline is now 9,560,960 B (was 9,428,464 B after the stage 04
+archive re-record and 7,071,040 B before it, where `rusqlite` bundled and the
+store's own code were measured at stage 01 as +1,762,736 B over a 7,632,640 B
+baseline). The five populated run medians at `e7131d6` are 5.531 / 8.078 /
+8.047 / 8.078 / 8.062 MB, median 8.062 MB, with stored sample bounds
+4.328–8.094 MB. Because the seeded scenario's passphrase provider pays a 19 MiB
+Argon2id derivation whose transient can still be resident at the idle sample
+(the production file-key path derives nothing), the populated band set in stage
+04 remains 3.5x / 3.0 MB (threshold 36.28 MB at the 8.062 MB baseline), which
+clears every run without re-derivation. Every other band kept its shape; its
+numbers are the new baseline below.
 
 **Limitation (not changed).** `host_key()` has no OS-version component, so the
 check cannot tell that a baseline predates an OS move: that is how the stored
@@ -105,31 +109,31 @@ baseline went stale without a signal. Adding the version would change enforcemen
 for every platform, CI included, and is a separate decision; the `environment.uname`
 field in the baseline records the version it was taken on.
 
-After the stage 04 re-record, five `make measure` runs and two
-`make measure-check` cycles on this tree — one in each mode of the populated
-figure — both reported "within budget", 8 figures checked. Two of the five:
+After the `e7131d6` re-record, the five `make measure` runs and
+`make measure-check` on this tree reported "within budget", 8 figures checked.
+Two of the five:
 
 | Run | RSS harness | RSS binary | RSS populated | First frame | Harness latency | Binary latency |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A (low mode) | 4,177,920 B | 8.125 MB | 8.000 MB | 1.465 ms | 0.986 ms | 0.115 ms |
-| B (high mode) | 4,161,536 B | 8.047 MB | 15.406 MB | 1.548 ms | 0.896 ms | 0.161 ms |
+| 1 (low mode) | 2,867,200 B | 8.000 MB | 5.531 MB | 1.317 ms | 0.891 ms | 0.113 ms |
+| 2 (steady mode) | 2,834,432 B | 7.969 MB | 8.078 MB | 13.521 ms | 0.911 ms | 0.211 ms |
 
-Binary size was 9,428,464 B on all five, and `Cargo.lock` matches the baseline.
+Binary size was 9,560,960 B on all five, and `Cargo.lock` matches the baseline.
 
 | Metric | Target | Measured | Verdict |
 | :--- | :--- | ---: | :--- |
-| RSS at idle, harness at 60 chats | < 50 MB | **4.15 MB** (4,145,152 B) | inside |
-| RSS at idle, shipped binary, unauthorised, empty list | < 50 MB | **8.05 MB** | inside |
-| RSS at idle, shipped binary, 60-chat seeded archive loaded | < 50 MB | **8.08 MB** (125-sample median; 7.98–33.91 MB, bimodal — see above) | inside |
-| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **1.548 ms** (five-run median; 1.465–2.261 ms) | inside |
-| Startup, harness launch → populated screen | — | **1.13 ms** | recorded |
-| Input latency, key→draw (real binary) | < 16 ms | **0.115 ms** | inside |
-| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.986 ms** | inside |
-| Frame time, harness | — | **0.657 ms** | recorded |
-| Binary size, stripped release | < 15 MB | **9,428,464 bytes** (8.99 MiB) | inside |
+| RSS at idle, harness at 60 chats | < 50 MB | **2.83 MB** (2,834,432 B) | inside |
+| RSS at idle, shipped binary, unauthorised, empty list | < 50 MB | **7.969 MB** | inside |
+| RSS at idle, shipped binary, 60-chat seeded archive loaded | < 50 MB | **8.062 MB** (125-sample median; 4.328–8.094 MB — see above) | inside |
+| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **2.234 ms** (five-run median; 1.317–13.521 ms) | inside |
+| Startup, harness launch → populated screen | — | **3.343 ms** | recorded |
+| Input latency, key→draw (real binary) | < 16 ms | **0.175 ms** | inside |
+| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.911 ms** | inside |
+| Frame time, harness | — | **0.647 ms** | recorded |
+| Binary size, stripped release | < 15 MB | **9,560,960 bytes** (9.12 MiB) | inside |
 
-The five runs of the populated figure were 8.078 / 8.016 / 33.797 / 15.406 /
-8.000 MB, a 25.8 MB spread; the raw samples behind them ranged 7.984–33.906 MB.
+The five runs of the populated figure were 5.531 / 8.078 / 8.047 / 8.078 /
+8.062 MB, a 2.547 MB spread; the raw samples behind them ranged 4.328–8.094 MB.
 The two modes are the seeded scenario's 19 MiB Argon2id derivation — sometimes
 still resident at the idle sample, sometimes returned — not a change in what the
 program holds. The band is set from that spread and the figure is a bound, not a
@@ -184,7 +188,7 @@ opt-in diagnostic (`make measure` with `--massif`), reported separately as
 **Environment.** `Darwin arm64`, Darwin 27.0.0; `rustc 1.98.1
 (48a229cea 2026-09-01)`, host `aarch64-apple-darwin`, LLVM 22.1.8; toolchain pin
 `channel = "1.98.1"`; release profile as above; `Cargo.lock` sha256
-`3b50c3d51f6df991…`; 8 CPUs. RSS read in-process from `proc_pidinfo`
+`909a0a7821fa0fec…`; 8 CPUs. RSS read in-process from `proc_pidinfo`
 (`/proc/self/status` on Linux), and from `/proc/<pid>/status` (`ps rss`) for the
 binary. No `valgrind`, `heaptrack`, or `hyperfine` on this host. The block also
 records the confounds that decided the figures above: credential and session
@@ -588,7 +592,7 @@ and what they pull in, inside the 1% band (about 57.6 KB). The stored baseline
 band before this change (+248,176 B), so `make measure-check` reports a binary-size
 breach that this change did not cause. The baseline was not re-recorded here; that
 was a maintainer decision, taken later and recorded under
-[Re-recorded for the 0.5.0 tree](#re-recorded-for-the-050-tree-five-runs).
+[Re-recorded for the `e7131d6` tree](#re-recorded-for-the-e7131d6-tree-five-runs).
 
 Enabling `zeroize` on `aes-gcm-siv` and `aes` (so the expanded AES key schedule
 is wiped on drop) was measured separately with `make measure` on the same host,
