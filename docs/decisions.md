@@ -1121,10 +1121,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   and the verification re-open from ordinary writes. Two worst-case runs at
   `37c74423236c534ca520b883baca95a23487ec86` measured a 48.0 MB write peak,
   below the 50 MB budget. This closes the earlier sealing-in-place follow-up.
-  The encoder still clones the cache collections to take a snapshot on the
-  cache's thread before handing the serialised payload to the writer. Removing
-  that snapshot would change the threading model without a demonstrated budget
-  need.
+  The encoder still clones the cache collections before serialising the owned
+  payload sent to the writer. A borrowed serialisation view could remove those
+  clones while retaining the owned bytes at the thread boundary. Its benefit and
+  complexity remain to be evaluated in [#229](https://github.com/curedbylethe/televim/issues/229).
 - **Why a fetched page is merged as the stretch it speaks for:** a cache that
   stored the last page fetched would hold one page; one that appended every page
   would keep messages the server has since deleted. So the cache holds one
