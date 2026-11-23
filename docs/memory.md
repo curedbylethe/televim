@@ -41,7 +41,11 @@ here, not something the driver does. The earlier 0.5.0 re-record (three runs at
 `99d0d8b`, then five runs for the archive) was taken on this same host after the
 Darwin 25.5.0 → 27.0.0 move.
 
-**Why.** (1) `make measure-check` failed on binary size: the stripped release
+**Why.** This re-record follows 41 source commits since the previous baseline,
+an old lock hash that matched no committed `Cargo.lock`, and binary growth from
+9,428,464 B to 9,560,960 B.
+
+**Why (earlier re-record at `99d0d8b`).** (1) `make measure-check` failed on binary size: the stripped release
 binary is 6,488,432 B against the stored 6,372,096 B, +116,336 B, past the 1% /
 32,768 B band (threshold 6,435,816.96 B); the same breach stood before the
 `zeroize` change (6,455,248 B, +83,152 B). (2) The baseline's lock hash (`2e948c09…`)
@@ -51,7 +55,7 @@ was not taken: `host_key()` is `<sysname>-<machine>` (`darwin-arm64` before and
 after the move), so a per-host file would be the same file; the baseline already
 is this host's.
 
-**Drift attribution (binary size, +116,336 B against 99d0d8b).** What is measured:
+**Drift attribution for the earlier re-record (binary size, +116,336 B against `99d0d8b`).** What is measured:
 the sealed session key (`aes-gcm-siv`, `argon2`) cost **+49,792 B** (6,007,456 B to
 6,057,248 B on its own tree), and enabling `zeroize` cost **+0 B** (page-aligned
 on this host). The history cache's +115,856 B is *not* part of this drift: its
@@ -96,12 +100,17 @@ archive re-record and 7,071,040 B before it, where `rusqlite` bundled and the
 store's own code were measured at stage 01 as +1,762,736 B over a 7,632,640 B
 baseline). The five populated run medians at `e7131d6` are 5.531 / 8.078 /
 8.047 / 8.078 / 8.062 MB, median 8.062 MB, with stored sample bounds
-4.328–8.094 MB. Because the seeded scenario's passphrase provider pays a 19 MiB
-Argon2id derivation whose transient can still be resident at the idle sample
-(the production file-key path derives nothing), the populated band set in stage
-04 remains 3.5x / 3.0 MB (threshold 36.28 MB at the 8.062 MB baseline), which
-clears every run without re-derivation. Every other band kept its shape; its
-numbers are the new baseline below.
+4.328–8.094 MB (median per-run minima and maxima). The raw samples ranged
+1.891–10.781 MB; they show a low mode,
+but its cause is not established. The existing populated band remains 3.5x /
+3.0 MB (threshold 36.28 MB at the 8.062 MB baseline) pending follow-up
+calibration (#228); it clears every recorded run. Other anchors moved too: first frame
+rose 44%, populated load rose from 1.13 to 3.343 ms, and binary input latency
+rose 52%. These timing shifts are accepted as refreshed host measurements
+without an attributed code cause; first frame, populated load, and input
+latency remain well below their declared limits. Harness RSS fell to 2.834 MB,
+whose 3.88 MB threshold still rejects a return to the previous 4.145 MB median. Every other
+band kept its shape; its numbers are the new baseline below.
 
 **Limitation (not changed).** `host_key()` has no OS-version component, so the
 check cannot tell that a baseline predates an OS move: that is how the stored
@@ -124,7 +133,7 @@ Binary size was 9,560,960 B on all five, and `Cargo.lock` matches the baseline.
 | :--- | :--- | ---: | :--- |
 | RSS at idle, harness at 60 chats | < 50 MB | **2.83 MB** (2,834,432 B) | inside |
 | RSS at idle, shipped binary, unauthorised, empty list | < 50 MB | **7.969 MB** | inside |
-| RSS at idle, shipped binary, 60-chat seeded archive loaded | < 50 MB | **8.062 MB** (125-sample median; 4.328–8.094 MB — see above) | inside |
+| RSS at idle, shipped binary, 60-chat seeded archive loaded | < 50 MB | **8.062 MB** (125-sample median; raw range 1.891–10.781 MB) | inside |
 | Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **2.234 ms** (five-run median; 1.317–13.521 ms) | inside |
 | Startup, harness launch → populated screen | — | **3.343 ms** | recorded |
 | Input latency, key→draw (real binary) | < 16 ms | **0.175 ms** | inside |
@@ -133,11 +142,10 @@ Binary size was 9,560,960 B on all five, and `Cargo.lock` matches the baseline.
 | Binary size, stripped release | < 15 MB | **9,560,960 bytes** (9.12 MiB) | inside |
 
 The five runs of the populated figure were 5.531 / 8.078 / 8.047 / 8.078 /
-8.062 MB, a 2.547 MB spread; the raw samples behind them ranged 4.328–8.094 MB.
-The two modes are the seeded scenario's 19 MiB Argon2id derivation — sometimes
-still resident at the idle sample, sometimes returned — not a change in what the
-program holds. The band is set from that spread and the figure is a bound, not a
-constant. The seeded scenario is 60 chats, 32 peers, 6,400 messages and 801,144
+8.062 MB, a 2.547 MB spread; the raw samples ranged 1.891–10.781 MB. The low
+mode's cause is not established, so the band remains pending follow-up
+calibration (#228). The figure is a bound, not a constant. The seeded scenario is 60
+chats, 32 peers, 6,400 messages and 801,144
 text bytes, launched credential-free on a sized pty so the list is drawn. It is
 the loaded program with a *warm archive* and no network half connected; it is
 still not a connected session.
@@ -331,14 +339,14 @@ whose RSS lands low passes instead of firing.
 
 | Metric | Baseline | Allowed growth | Threshold |
 | :--- | ---: | ---: | ---: |
-| RSS@idle, harness (60 chats) | 4,145,152 B | +1.05 MB | 5.19 MB |
-| RSS@idle, shipped binary | 8.047 MB | +3.0 MB | 11.05 MB |
-| RSS@idle, shipped binary, 60-chat seeded archive | 8.078 MB | +28.27 MB | 36.35 MB |
-| Startup, first frame | 1.548 ms | +8.0 ms | 9.55 ms |
-| Startup, populated load | 1.13 ms | +2.5 ms | 3.63 ms |
-| Input latency, harness | 0.986 ms | +0.197 ms | 1.18 ms |
-| Input latency, shipped binary | 0.115 ms | +0.173 ms | 0.29 ms |
-| Binary size | 9,428,464 B | +94,285 B | 9,522,749 B |
+| RSS@idle, harness (60 chats) | 2,834,432 B | +1.05 MB | 3.88 MB |
+| RSS@idle, shipped binary | 7.969 MB | +3.0 MB | 10.97 MB |
+| RSS@idle, shipped binary, 60-chat seeded archive | 8.062 MB | +28.22 MB | 36.28 MB |
+| Startup, first frame | 2.234 ms | +8.0 ms | 10.23 ms |
+| Startup, populated load | 3.343 ms | +2.5 ms | 5.84 ms |
+| Input latency, harness | 0.911 ms | +0.182 ms | 1.09 ms |
+| Input latency, shipped binary | 0.175 ms | +0.2625 ms | 0.4375 ms |
+| Binary size | 9,560,960 B | +95,610 B | 9,656,570 B |
 
 Three of these are as tight as the noise allows and one is not, and the
 difference is the point:
@@ -355,12 +363,11 @@ difference is the point:
   calibrated against a *connected* binary, where the spread was what the network
   half happened to hold resident; the unauthorised binary is steadier, but the
   band was not tightened on the strength of five runs, so it stays loose.
-- **The seeded archive's RSS** is loose in *absolute* terms (3.5x, 28.27 MB at
-  this baseline) for the reason above: the passphrase provider's 19 MiB Argon2id
-  transient makes the figure bimodal, and a band that failed two of the five
-  runs that set it would not be a budget. Both modes of all five runs pass. A
-  production file-key path derives nothing, so the high mode is a property of
-  the measurement setup rather than of the shipped session.
+- **The seeded archive's RSS** is loose in *absolute* terms (3.5x, 28.22 MB at
+  this baseline) while the low mode's cause remains unknown. The 3.5x band is
+  retained pending follow-up calibration (#228); all five runs pass it. The production
+  file-key path derives nothing, so the seeded provider's Argon2id allocation
+  does not explain the measured low mode.
 
 ### The CI invocation
 
@@ -852,7 +859,7 @@ what was actually found.
 
 Chosen against the baseline above, and the alternatives were `tikv-jemallocator`
 and `mimalloc`. The tree is already inside both ceilings with two to three times
-of margin — **9,428,464 B** stripped against < 15 MB, and **4.15 MB** / **8.05 MB** / **8.08 MB**
+of margin — **9,560,960 B** stripped against < 15 MB, and **2.83 MB** / **7.97 MB** / **8.06 MB**
 RSS@idle against < 50 MB — so a candidate would have to give some of it back to
 be worth adopting. The workload is not the one those allocators target: a
 single-threaded current-thread `tokio` plus one reader thread, not many threads
