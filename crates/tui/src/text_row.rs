@@ -449,6 +449,29 @@ pub(crate) fn visual_caret(text: &str, range: &Range<usize>, at: usize) -> usize
     }
 }
 
+/// The spans for an empty line that carries a placeholder.
+///
+/// The words take the dim token, and the caret keeps its shape on their first
+/// cell: a caret is a cell, and moving it past the placeholder would put it in
+/// the middle of a line the reader has not written. Callers pass the text; this
+/// module knows nothing about why a line has it.
+#[must_use]
+pub fn placeholder<'a>(text: &'a str, theme: &Theme, caret: Style) -> Vec<Span<'a>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    // The caret keeps its shape but not its own bright foreground: the whole
+    // placeholder is dim, including the cell the caret stands on.
+    let first = text.chars().next().map_or(0, char::len_utf8);
+    let mut out = Vec::new();
+    out.push(Span::styled(&text[..first], caret.patch(theme.text_dim)));
+    if first < text.len() {
+        out.push(Span::styled(&text[first..], theme.text_dim));
+    }
+    out
+}
+
 /// The style a span is painted in: the caret's where the caret is, and its own
 /// everywhere else.
 fn effective(row: &TextRow<'_>, style: Style, on_caret: bool) -> Style {
