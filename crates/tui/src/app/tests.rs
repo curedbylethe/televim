@@ -7776,8 +7776,9 @@ fn a_search_line_never_completes() {
     assert!(app.completion().is_none(), "a search is not a shortcode");
 }
 
-/// The gate is `is_buffer`, not `Message`: a reply and an edit are buffers
-/// too, and a reader answering either can name an emoji.
+/// The gate is `completes_shortcode`, not `Message`: a reply and an edit are
+/// buffers too, and a reader answering either can name an emoji. The reaction
+/// line is admitted by the new predicate without becoming a buffer.
 #[test]
 fn a_reply_and_an_edit_do_complete() {
     let mut reply = App::mock();
@@ -7794,6 +7795,106 @@ fn a_reply_and_an_edit_do_complete() {
     assert_eq!(edit.input.line.purpose(), PromptKind::Edit);
     type_text(&mut edit, ":cr");
     assert!(edit.completion().is_some(), "an edit completes");
+}
+
+/// An application with the reaction line open, holding `draft`.
+fn typing_a_reaction(draft: &str) -> App {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+    assert_eq!(app.input.line.purpose(), PromptKind::React);
+    type_text(&mut app, draft);
+    app
+}
+
+#[test]
+fn a_shortcode_on_the_reaction_line_opens_and_obeys_the_completion_keys() {
+    let mut app = typing_a_reaction(":th");
+
+    let trigger = app
+        .completion()
+        .expect("a completion is up on the reaction line");
+    assert_eq!(trigger.query, "th");
+    let count = trigger.candidates.len();
+    assert!(count > 1, "there is a list to move through");
+
+    app.handle_key(press(KeyCode::Down));
+    assert_eq!(
+        app.completion().expect("still up").selected,
+        1,
+        "down moves the candidate"
+    );
+    for _ in 1..count {
+        app.handle_key(press(KeyCode::Down));
+    }
+    assert_eq!(
+        app.completion().expect("still up").selected,
+        0,
+        "the selection wrapped"
+    );
+
+    app.handle_key(press(KeyCode::Esc));
+    assert!(app.completion().is_none(), "Esc puts the popup away");
+    assert_eq!(app.input.line.text(), ":th", "and keeps the words");
+}
+
+/// Accepting is one press; the glyph then waits for its own `Enter` to send it.
+#[test]
+fn accepting_on_the_reaction_line_writes_the_set_glyph_and_the_next_enter_sends() {
+    let mut app = typing_a_reaction(":th");
+    let expected = app
+        .completion()
+        .and_then(emoji::Trigger::chosen)
+        .and_then(|chosen| crate::emoji::reaction_member(chosen.as_str()))
+        .expect("the chosen candidate is a reaction")
+        .to_owned();
+
+    app.handle_key(press(KeyCode::Tab));
+
+    assert_eq!(app.input.line.text(), expected);
+    assert!(app.completion().is_none(), "the popup is away");
+    assert_eq!(app.take_action(), None, "accepting did not send");
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            emoticon: Some(expected),
+        })
+    );
+}
+
+#[test]
+fn the_reaction_line_offers_members_only_while_the_message_bar_offers_the_catalog() {
+    let reactions = typing_a_reaction(":rocket");
+    let offered: Vec<&'static emojis::Emoji> = reactions
+        .completion()
+        .map(|trigger| trigger.candidates.clone())
+        .unwrap_or_default();
+
+    assert!(
+        offered
+            .iter()
+            .all(|emoji| crate::emoji::reaction_member(emoji.as_str()).is_some()),
+        "a non-reaction was offered on the reaction line"
+    );
+    assert!(
+        offered.iter().all(|emoji| emoji.as_str() != "🚀"),
+        "🚀 is not a reaction"
+    );
+
+    let message = typing(":rocket");
+    assert!(
+        message
+            .completion()
+            .expect("the message bar completes")
+            .candidates
+            .iter()
+            .any(|emoji| emoji.as_str() == "🚀"),
+        "the message bar keeps the full catalog"
+    );
 }
 
 // ---- the sign-in field through the command that opens it ---------------
