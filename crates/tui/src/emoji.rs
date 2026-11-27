@@ -21,6 +21,113 @@ use std::ops::Range;
 /// two numbers for one list is one of them eventually disagreeing.
 pub const MAX_CANDIDATES: usize = 8;
 
+/// The emoji Telegram accepts as a reaction, free tier only.
+///
+/// Source: <https://core.telegram.org/bots/api#reactiontypeemoji> (Bot API
+/// 10.5), checked 2026-11-28. That is a published enumeration, not a live one:
+/// the set is per account and grows, so a glyph added after that date is
+/// refused locally until this set is updated. Written without U+FE0F where
+/// Telegram writes it that way; [`reaction_member`] normalises before matching.
+/// U+200D is part of four members and is never stripped.
+// Stages 02 and 03 are the consumers; they land after this stage.
+#[allow(dead_code)]
+pub(crate) static REACTIONS: [&str; 73] = [
+    "❤",
+    "👍",
+    "👎",
+    "🔥",
+    "🥰",
+    "👏",
+    "😁",
+    "🤔",
+    "🤯",
+    "😱",
+    "🤬",
+    "😢",
+    "🎉",
+    "🤩",
+    "🤮",
+    "💩",
+    "🙏",
+    "👌",
+    "🕊",
+    "🤡",
+    "🥱",
+    "🥴",
+    "😍",
+    "🐳",
+    "❤‍🔥",
+    "🌚",
+    "🌭",
+    "💯",
+    "🤣",
+    "⚡",
+    "🍌",
+    "🏆",
+    "💔",
+    "🤨",
+    "😐",
+    "🍓",
+    "🍾",
+    "💋",
+    "🖕",
+    "😈",
+    "😴",
+    "😭",
+    "🤓",
+    "👻",
+    "👨‍💻",
+    "👀",
+    "🎃",
+    "🙈",
+    "😇",
+    "😨",
+    "🤝",
+    "✍",
+    "🤗",
+    "🫡",
+    "🎅",
+    "🎄",
+    "☃",
+    "💅",
+    "🤪",
+    "🗿",
+    "🆒",
+    "💘",
+    "🙉",
+    "🦄",
+    "😘",
+    "💊",
+    "🙊",
+    "😎",
+    "👾",
+    "🤷‍♂",
+    "🤷",
+    "🤷‍♀",
+    "😡",
+];
+
+/// The characters of a glyph with only U+FE0F removed.
+#[allow(dead_code)]
+fn normalised_chars(glyph: &str) -> impl Iterator<Item = char> + '_ {
+    glyph.chars().filter(|&c| c != '\u{FE0F}')
+}
+
+/// Which reaction this glyph is, if any.
+///
+/// One lookup for both questions: a reader's glyph on submit and a candidate
+/// from the catalog. Both sides are compared with U+FE0F removed and nothing
+/// else — U+200D stays, so `❤‍🔥` is not `❤`. The value returned is the
+/// set's own string, never the caller's lookalike, so it is safe to send.
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn reaction_member(glyph: &str) -> Option<&'static str> {
+    REACTIONS
+        .iter()
+        .copied()
+        .find(|member| normalised_chars(member).eq(normalised_chars(glyph)))
+}
+
 /// The `:query` fragment the caret is inside, and what it could become.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trigger {
@@ -165,9 +272,31 @@ fn is_word(c: char) -> bool {
 /// typed is the thing they are looking at. Ties keep catalog order, which is
 /// CLDR order and therefore stable across runs.
 fn candidates(query: &str) -> Vec<&'static emojis::Emoji> {
+    ranked_candidates(query, |_| true)
+}
+
+/// The reaction-only candidates for `query`, best first.
+///
+/// The same walk, ranks and ceiling as [`candidates`], with admission by the
+/// set instead of the catalog. A member the pinned `emojis` version does
+/// not know simply never appears here; membership itself is [`reaction_member`].
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn reaction_candidates(query: &str) -> Vec<&'static emojis::Emoji> {
+    ranked_candidates(query, |emoji| reaction_member(emoji.as_str()).is_some())
+}
+
+/// The one walk and rank behind both candidate lists.
+///
+/// The only difference between the lists is `admitted`, so the exact/prefix/
+/// substring rule, the sort key and the ceiling cannot drift between them.
+fn ranked_candidates(
+    query: &str,
+    admitted: impl Fn(&emojis::Emoji) -> bool,
+) -> Vec<&'static emojis::Emoji> {
     let mut ranked: Vec<(u8, usize, &'static emojis::Emoji)> = Vec::new();
 
-    for emoji in emojis::iter() {
+    for emoji in emojis::iter().filter(|emoji| admitted(emoji)) {
         let best = emoji
             .shortcodes()
             .filter_map(|shortcode| tier(shortcode, query).map(|tier| (tier, shortcode.len())))
@@ -357,5 +486,80 @@ mod tests {
                 trigger.candidates.len()
             );
         }
+    }
+
+    #[test]
+    fn the_reaction_set_has_73_distinct_members_after_normalisation() {
+        assert_eq!(REACTIONS.len(), 73);
+
+        let mut normalised: Vec<String> = REACTIONS
+            .iter()
+            .map(|glyph| glyph.replace('\u{FE0F}', ""))
+            .collect();
+        normalised.sort();
+        normalised.dedup();
+
+        assert_eq!(normalised.len(), 73);
+    }
+
+    #[test]
+    fn a_variation_selector_does_not_change_the_member() {
+        let with = reaction_member("❤️").expect("❤️ is a reaction");
+        let without = reaction_member("❤").expect("❤ is a reaction");
+
+        assert_eq!(with, without);
+        assert!(
+            REACTIONS.iter().any(|member| std::ptr::eq(*member, with)),
+            "the lookup returns the set's own string"
+        );
+    }
+
+    #[test]
+    fn a_zero_width_joiner_is_part_of_the_member() {
+        let on_fire = reaction_member("❤‍🔥").expect("❤‍🔥 is a reaction");
+
+        assert!(on_fire.contains('\u{200D}'));
+        assert_ne!(on_fire, reaction_member("❤").expect("❤ is a reaction"));
+    }
+
+    #[test]
+    fn a_glyph_outside_the_set_is_not_a_reaction() {
+        for glyph in ["🫰", "🐈"] {
+            assert!(reaction_member(glyph).is_none(), "{glyph}");
+        }
+    }
+
+    #[test]
+    fn the_reaction_list_admits_members_only_while_candidates_admits_everything() {
+        let full = candidates("thumb");
+        let reactions = reaction_candidates("thumb");
+
+        assert!(!reactions.is_empty());
+        assert!(
+            reactions
+                .iter()
+                .all(|emoji| reaction_member(emoji.as_str()).is_some())
+        );
+        assert!(
+            full.iter()
+                .any(|emoji| reaction_member(emoji.as_str()).is_none()),
+            "the message bar keeps the full catalog"
+        );
+    }
+
+    #[test]
+    fn the_reaction_list_keeps_the_full_catalogs_ranking() {
+        let expected: Vec<&str> = candidates("fire")
+            .into_iter()
+            .filter(|emoji| reaction_member(emoji.as_str()).is_some())
+            .map(emojis::Emoji::as_str)
+            .collect();
+        let actual: Vec<&str> = reaction_candidates("fire")
+            .into_iter()
+            .map(emojis::Emoji::as_str)
+            .collect();
+
+        assert!(actual.len() > 1);
+        assert_eq!(actual, expected);
     }
 }
