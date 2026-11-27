@@ -2928,10 +2928,10 @@ fn a_hyphen_with_no_chip_of_the_reader_s_own_is_refused() {
     assert_eq!(app.take_action(), None);
 }
 
-/// A family emoji of six code points is one glyph, so the line reads it as one
-/// reaction rather than as six.
+/// One glyph is not enough: a glyph Telegram would not take is refused on the
+/// status line, nothing is queued, and the reader can fix the line in place.
 #[test]
-fn a_reaction_can_be_a_grapheme_of_several_code_points() {
+fn a_reaction_line_refuses_an_emoji_outside_the_set() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('+')));
 
@@ -2939,11 +2939,82 @@ fn a_reaction_can_be_a_grapheme_of_several_code_points() {
     app.handle_key(press(KeyCode::Enter));
 
     assert_eq!(
+        app.status_text(),
+        "That emoji is not a reaction.",
+        "the refusal is bright, like the two above it"
+    );
+    assert_eq!(app.take_action(), None, "nothing was queued");
+    assert_eq!(
+        app.take_action(),
+        None,
+        "and nothing was queued a second time"
+    );
+    assert_eq!(
+        app.input.line.purpose(),
+        PromptKind::React,
+        "the line stays open on its own refusal"
+    );
+    assert_eq!(
+        app.input.line.text(),
+        "👨‍👩‍👧",
+        "with the refused glyph still in it"
+    );
+}
+
+/// A glyph in the set leaves as the set's own string.
+#[test]
+fn a_reaction_line_sends_a_supported_emoji() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+
+    type_text(&mut app, "👍");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
         app.take_action(),
         Some(Action::React {
             chat_id: MOCK_CHAT,
             message_id: 10,
-            emoticon: Some("👨‍👩‍👧".to_owned()),
+            emoticon: Some("👍".to_owned()),
+        })
+    );
+}
+
+/// The reader's `❤️` carries U+FE0F; the set's `❤` does not. What leaves the
+/// process is the set's string, not the reader's lookalike.
+#[test]
+fn a_reaction_line_sends_the_set_glyph_for_a_variation_selector() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+
+    type_text(&mut app, "❤️");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            emoticon: Some("❤".to_owned()),
+        })
+    );
+}
+
+/// A supported glyph of several code points is one reaction, not several.
+#[test]
+fn a_reaction_can_be_a_grapheme_of_several_code_points() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+
+    type_text(&mut app, "👨‍💻");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            emoticon: Some("👨‍💻".to_owned()),
         })
     );
 }

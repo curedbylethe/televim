@@ -1809,7 +1809,11 @@ pub(crate) fn submit_reaction(
             ui.flash("Type one emoji to react.");
             return;
         };
-        Some(glyph.to_owned())
+        let Some(member) = crate::emoji::reaction_member(glyph) else {
+            ui.flash("That emoji is not a reaction.");
+            return;
+        };
+        Some(member.to_owned())
     };
 
     queue_action(
