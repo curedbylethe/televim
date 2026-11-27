@@ -686,6 +686,21 @@ fn body_row<'a>(
         BidiMode::Terminal => text_row::spans(&row),
     });
 
+    // Only the caller knows why the line is open, so only the caller supplies
+    // the words. An empty line has no cell of its own for the caret, which is
+    // why the helper paints one on the placeholder's first character.
+    if focused
+        && caret_row
+        && app.input.line.text().is_empty()
+        && matches!(app.input.line.purpose(), PromptKind::React)
+    {
+        spans.extend(text_row::placeholder(
+            "One emoji only.",
+            &app.ui.theme,
+            row.ink.caret,
+        ));
+    }
+
     Line::from(spans)
 }
 
@@ -790,6 +805,13 @@ mod tests {
         rows.iter()
             .position(|row| row.contains(" draft "))
             .expect("the bar marks a draft, and this is one")
+    }
+
+    /// The row the bar's top border is on while the reaction line is open.
+    fn reaction_top(rows: &[String]) -> usize {
+        rows.iter()
+            .position(|row| row.contains(" Reaction "))
+            .expect("the reaction bar draws its title")
     }
 
     // ---- the hints -------------------------------------------------------
@@ -970,6 +992,91 @@ mod tests {
         type_text(&mut app, "half a th");
 
         assert!(flat(&screen(&app, 80, 24)).contains("half·a·th"));
+    }
+
+    #[test]
+    fn an_empty_reaction_line_draws_a_placeholder() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('+'));
+
+        let rows = rows_of(&screen(&app, 80, 24));
+        let top = reaction_top(&rows);
+
+        assert!(
+            rows[top + 1].contains("One emoji only."),
+            "the empty line says what it takes: {:?}",
+            rows[top + 1]
+        );
+    }
+
+    #[test]
+    fn the_reaction_placeholder_is_dim() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('+'));
+
+        let buffer = screen(&app, 80, 24);
+        let top = reaction_top(&rows_of(&buffer)) as u16 + 1;
+        let dim = app.ui.theme.text_dim.fg.expect("the dim token has an ink");
+
+        for x in 1..=15 {
+            assert_eq!(
+                buffer[(x, top)].fg,
+                dim,
+                "the placeholder cell at {x} is dim"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reaction_placeholder_vanishes_on_the_first_character() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('+'));
+        type_text(&mut app, "a");
+
+        assert!(!app.input.line.text().is_empty(), "the line holds a glyph");
+        let shown = flat(&screen(&app, 80, 24));
+        assert!(
+            !shown.contains("One emoji only."),
+            "the placeholder is gone: {shown}"
+        );
+    }
+
+    #[test]
+    fn the_reaction_caret_stays_at_the_start_of_the_line() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('+'));
+
+        let buffer = screen(&app, 80, 24);
+        let top = reaction_top(&rows_of(&buffer)) as u16;
+        let found = carets(&buffer, top);
+
+        assert_eq!(found.len(), 1, "one caret on the empty line: {found:?}");
+        assert_eq!(found[0].0, 1, "the caret is in the first inner column");
+        assert_eq!(
+            buffer[(found[0].0, found[0].1)].symbol(),
+            "O",
+            "the placeholder's first character is on the caret's cell"
+        );
+    }
+
+    #[test]
+    fn an_empty_message_line_draws_no_placeholder() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+
+        let buffer = screen(&app, 80, 24);
+        let rows = rows_of(&buffer);
+        let top = bar_top(&rows);
+
+        let inside = rows[top + 1].chars().skip(1);
+        assert!(
+            inside
+                .take(rows[top + 1].chars().count() - 2)
+                .all(char::is_whitespace),
+            "an empty message line draws no text: {:?}",
+            rows[top + 1]
+        );
+        assert!(!flat(&buffer).contains("One emoji only."));
     }
 
     // ---- the draft's subject --------------------------------------------
