@@ -2761,9 +2761,9 @@ pub(crate) fn unread(list: &mut ChatListState, conversation: &mut ConversationSt
 ///
 /// Called after every key the line answered, and never anywhere else. A
 /// re-detection is a few microseconds, so there is nothing to be careful
-/// about. The gate is [`PromptKind::is_buffer`] rather than
-/// [`PromptKind::Message`]: a `:` command line and a `/` search line never
-/// complete, but a reply and an edit do. It is also insert mode only,
+/// about. The gate is [`PromptKind::completes_shortcode`] rather than
+/// [`PromptKind::is_buffer`]: a `:` command line and a `/` search line never
+/// complete, but a reply, an edit and a reaction do. It is also insert mode only,
 /// because a shortcode is typed: the key that leaves insert for the line's
 /// own normal mode is not editing the text, so it must not re-open what the
 /// reader just put away.
@@ -2773,7 +2773,7 @@ pub(crate) fn unread(list: &mut ChatListState, conversation: &mut ConversationSt
 /// still there.
 pub(crate) fn refresh_completion(ui: &mut UiState, input: &mut InputState) {
     if ui.focus != Focus::Input
-        || !input.line.purpose().is_buffer()
+        || !input.line.purpose().completes_shortcode()
         || input.line.status() != "INSERT"
     {
         input.dismiss_completion();

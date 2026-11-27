@@ -1,5 +1,6 @@
 //! The live input line and the emoji popup over it.
 
+use crate::PromptKind;
 use crate::emoji;
 use crate::line::{LineEditor, LineVerdict};
 
@@ -61,7 +62,8 @@ impl InputState {
     /// The inserted text is exactly what was accepted: no trailing space,
     /// because a character the reader did not ask for is one they would have to
     /// delete. The range comes from the trigger, so what is replaced is what
-    /// the popup was describing.
+    /// the popup was describing; so does the text, so the reaction line writes
+    /// the set's string rather than a lookalike from the catalog.
     ///
     /// Answers with the replace's own verdict. `TooLong` leaves the popup up
     /// and is the host's to say out loud; anything else puts it away.
@@ -69,11 +71,10 @@ impl InputState {
         let Some(trigger) = self.emoji.as_ref() else {
             return LineVerdict::Ignored;
         };
-        let Some(chosen) = trigger.chosen() else {
+        let Some(text) = trigger.chosen_text() else {
             return LineVerdict::Ignored;
         };
         let range = trigger.range.clone();
-        let text = chosen.as_str();
 
         match self.line.replace(range, text) {
             LineVerdict::TooLong => LineVerdict::TooLong,
@@ -90,7 +91,11 @@ impl InputState {
     /// so typing one more character does not move them off a candidate that is
     /// still there.
     pub(crate) fn redetect_completion(&mut self, selected: usize) {
-        self.emoji = emoji::detect(self.line.text(), self.line.caret());
+        let palette = match self.line.purpose() {
+            PromptKind::React => emoji::Palette::Reactions,
+            _ => emoji::Palette::Full,
+        };
+        self.emoji = emoji::detect(self.line.text(), self.line.caret(), palette);
         if let Some(trigger) = &mut self.emoji {
             trigger.reselect(selected);
         }

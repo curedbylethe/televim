@@ -4,8 +4,8 @@
 //! every key that reaches the line rather than cached: a cache is a second
 //! thing to keep in step with the buffer, and that is the failure this module
 //! exists not to have. Deciding whether the reader is completing is [`detect`];
-//! ranking what the catalog offers is [`candidates`], which is private to this
-//! module and reached through the trigger.
+//! ranking what the chosen palette offers is [`candidates`] or
+//! [`reaction_candidates`], reached through the trigger.
 //!
 //! The catalog is [`emojis`], the GitHub gemoji set: 1914 emoji in CLDR order,
 //! 1870 of them with a shortcode and 40 with more than one. It is `&'static`
@@ -21,6 +21,19 @@ use std::ops::Range;
 /// two numbers for one list is one of them eventually disagreeing.
 pub const MAX_CANDIDATES: usize = 8;
 
+/// Which set a shortcode is ranked over.
+///
+/// The message bar completes against the whole catalog; the reaction line
+/// completes against the set Telegram accepts. A palette rather than a
+/// `PromptKind`, because this module knows nothing about the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Palette {
+    /// Every shortcode in the catalog.
+    Full,
+    /// Only emoji Telegram accepts as a reaction.
+    Reactions,
+}
+
 /// The emoji Telegram accepts as a reaction, free tier only.
 ///
 /// Source: <https://core.telegram.org/bots/api#reactiontypeemoji> (Bot API
@@ -29,8 +42,6 @@ pub const MAX_CANDIDATES: usize = 8;
 /// refused locally until this set is updated. Written without U+FE0F where
 /// Telegram writes it that way; [`reaction_member`] normalises before matching.
 /// U+200D is part of four members and is never stripped.
-// Stages 02 and 03 are the consumers; they land after this stage.
-#[allow(dead_code)]
 pub(crate) static REACTIONS: [&str; 73] = [
     "❤",
     "👍",
@@ -108,7 +119,6 @@ pub(crate) static REACTIONS: [&str; 73] = [
 ];
 
 /// The characters of a glyph with only U+FE0F removed.
-#[allow(dead_code)]
 fn normalised_chars(glyph: &str) -> impl Iterator<Item = char> + '_ {
     glyph.chars().filter(|&c| c != '\u{FE0F}')
 }
@@ -120,7 +130,6 @@ fn normalised_chars(glyph: &str) -> impl Iterator<Item = char> + '_ {
 /// else — U+200D stays, so `❤‍🔥` is not `❤`. The value returned is the
 /// set's own string, never the caller's lookalike, so it is safe to send.
 #[must_use]
-#[allow(dead_code)]
 pub(crate) fn reaction_member(glyph: &str) -> Option<&'static str> {
     REACTIONS
         .iter()
@@ -145,6 +154,9 @@ pub struct Trigger {
 
     /// Which one the reader is on. Always inside `candidates`.
     pub selected: usize,
+
+    /// The set the candidates came from; it also decides the accepted text.
+    pub palette: Palette,
 }
 
 impl Trigger {
@@ -152,6 +164,19 @@ impl Trigger {
     #[must_use]
     pub fn chosen(&self) -> Option<&'static emojis::Emoji> {
         self.candidates.get(self.selected).copied()
+    }
+
+    /// The text to write for that candidate.
+    ///
+    /// The reaction set's own string on the reaction line, so what lands there
+    /// is what submitting sends; the catalog string for every other prompt.
+    #[must_use]
+    pub fn chosen_text(&self) -> Option<&'static str> {
+        let emoji = self.chosen()?;
+        match self.palette {
+            Palette::Full => Some(emoji.as_str()),
+            Palette::Reactions => reaction_member(emoji.as_str()),
+        }
     }
 
     /// Moves the selection one candidate, wrapping at both ends.
@@ -197,7 +222,7 @@ impl Trigger {
 /// did not ask, and it re-appears on every keystroke of a word they are still
 /// typing.
 #[must_use]
-pub fn detect(text: &str, caret: usize) -> Option<Trigger> {
+pub fn detect(text: &str, caret: usize, palette: Palette) -> Option<Trigger> {
     let caret = caret.min(text.len());
     let colon = text[..caret].rfind(':')?;
     let query = &text[colon + 1..caret];
@@ -214,7 +239,10 @@ pub fn detect(text: &str, caret: usize) -> Option<Trigger> {
         return None;
     }
 
-    let candidates = candidates(query);
+    let candidates = match palette {
+        Palette::Full => candidates(query),
+        Palette::Reactions => reaction_candidates(query),
+    };
     if candidates.is_empty() {
         return None;
     }
@@ -224,6 +252,7 @@ pub fn detect(text: &str, caret: usize) -> Option<Trigger> {
         query: query.to_owned(),
         candidates,
         selected: 0,
+        palette,
     })
 }
 
@@ -281,7 +310,6 @@ fn candidates(query: &str) -> Vec<&'static emojis::Emoji> {
 /// set instead of the catalog. A member the pinned `emojis` version does
 /// not know simply never appears here; membership itself is [`reaction_member`].
 #[must_use]
-#[allow(dead_code)]
 pub(crate) fn reaction_candidates(query: &str) -> Vec<&'static emojis::Emoji> {
     ranked_candidates(query, |emoji| reaction_member(emoji.as_str()).is_some())
 }
@@ -335,7 +363,7 @@ mod tests {
 
     /// The candidate shortcodes for a draft with the caret at its end.
     fn shortcodes(text: &str) -> Vec<&'static str> {
-        detect(text, text.len())
+        detect(text, text.len(), Palette::Full)
             .map(|trigger| {
                 trigger
                     .candidates
@@ -348,7 +376,7 @@ mod tests {
 
     #[test]
     fn the_query_is_the_text_between_the_colon_and_the_caret() {
-        let trigger = detect("hi :cry", 7).expect("a completion is up");
+        let trigger = detect("hi :cry", 7, Palette::Full).expect("a completion is up");
 
         assert_eq!(trigger.range, 3..7);
         assert_eq!(trigger.query, "cry");
@@ -356,7 +384,7 @@ mod tests {
 
     #[test]
     fn a_shortcode_at_the_start_of_the_draft_still_opens_it() {
-        let trigger = detect(":cry", 4).expect("a completion is up");
+        let trigger = detect(":cry", 4, Palette::Full).expect("a completion is up");
 
         assert_eq!(trigger.range, 0..4);
     }
@@ -364,40 +392,46 @@ mod tests {
     #[test]
     fn a_colon_with_no_query_is_not_a_shortcode() {
         for text in [":", "::", ":-)"] {
-            assert!(detect(text, text.len()).is_none(), "{text:?}");
+            assert!(
+                detect(text, text.len(), Palette::Full).is_none(),
+                "{text:?}"
+            );
         }
     }
 
     #[test]
     fn a_query_that_does_not_begin_with_a_letter_is_not_a_shortcode() {
         for text in [":1", ":8ball", ":+1", ":-"] {
-            assert!(detect(text, text.len()).is_none(), "{text:?}");
+            assert!(
+                detect(text, text.len(), Palette::Full).is_none(),
+                "{text:?}"
+            );
         }
     }
 
     #[test]
     fn a_url_is_not_a_shortcode() {
-        assert!(detect("https://", 8).is_none());
+        assert!(detect("https://", 8, Palette::Full).is_none());
     }
 
     #[test]
     fn a_clock_is_not_a_shortcode() {
-        assert!(detect("12:30", 5).is_none());
+        assert!(detect("12:30", 5, Palette::Full).is_none());
     }
 
     #[test]
     fn a_word_character_before_the_colon_ends_it() {
-        assert!(detect("note:cry", 8).is_none());
+        assert!(detect("note:cry", 8, Palette::Full).is_none());
     }
 
     #[test]
     fn a_character_the_catalog_has_no_use_for_ends_the_query() {
-        assert!(detect(":cry!", 5).is_none());
+        assert!(detect(":cry!", 5, Palette::Full).is_none());
     }
 
     #[test]
     fn a_query_nobody_matches_opens_nothing() {
-        assert!(detect(":zzzqqq", 7).is_none());
+        assert!(detect(":zzzqqq", 7, Palette::Full).is_none());
     }
 
     /// The catalog is pinned here rather than trusted: an `emojis` upgrade that
@@ -430,7 +464,7 @@ mod tests {
     #[test]
     fn an_alias_shortcode_finds_the_same_emoji() {
         for query in [":poop", ":hankey"] {
-            let trigger = detect(query, query.len()).expect("a completion is up");
+            let trigger = detect(query, query.len(), Palette::Full).expect("a completion is up");
             let chosen = trigger.chosen().expect("a candidate is chosen");
 
             assert_eq!(chosen.as_str(), "💩", "{query}");
@@ -440,7 +474,7 @@ mod tests {
     #[test]
     fn every_candidate_carries_the_shortcode_that_matched_it() {
         for query in [":cry", ":poop", ":a", ":smile", ":heart", ":flag"] {
-            let trigger = detect(query, query.len()).expect("a completion is up");
+            let trigger = detect(query, query.len(), Palette::Full).expect("a completion is up");
 
             assert!(!trigger.candidates.is_empty(), "{query}");
             assert!(
@@ -455,7 +489,7 @@ mod tests {
 
     #[test]
     fn the_selection_wraps_in_both_directions() {
-        let mut trigger = detect(":cry", 4).expect("a completion is up");
+        let mut trigger = detect(":cry", 4, Palette::Full).expect("a completion is up");
         assert!(trigger.candidates.len() > 1);
 
         trigger.move_selection(false);
@@ -467,7 +501,7 @@ mod tests {
 
     #[test]
     fn the_selection_is_clamped_into_a_shorter_list() {
-        let mut trigger = detect(":cry", 4).expect("a completion is up");
+        let mut trigger = detect(":cry", 4, Palette::Full).expect("a completion is up");
         assert_eq!(trigger.candidates.len(), 3);
 
         trigger.reselect(7);
@@ -478,7 +512,7 @@ mod tests {
     #[test]
     fn the_candidate_list_is_never_longer_than_the_ceiling() {
         for query in [":a", ":e", ":o"] {
-            let trigger = detect(query, query.len()).expect("a completion is up");
+            let trigger = detect(query, query.len(), Palette::Full).expect("a completion is up");
 
             assert!(
                 trigger.candidates.len() <= MAX_CANDIDATES,

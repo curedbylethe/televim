@@ -755,6 +755,17 @@ impl PromptKind {
         matches!(self, Self::Message | Self::Reply | Self::Edit)
     }
 
+    /// Whether this prompt completes a `:shortcode`.
+    ///
+    /// The buffers, plus the reaction line: a `:query` there names an emoji as
+    /// much as one in a message does. Not [`Self::is_buffer`] widened — `React`
+    /// gets no newline and keeps no draft. A command and a search answer a
+    /// different question, so their colons and slashes stay ordinary text.
+    #[must_use]
+    pub const fn completes_shortcode(self) -> bool {
+        self.is_buffer() || matches!(self, Self::React)
+    }
+
     /// Which sign-in field this prompt is, if it is one.
     ///
     /// The three-way answer rather than a `login: bool`, because the fields are
