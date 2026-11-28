@@ -5,6 +5,15 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.18.0] - 2026-11-28
+
+### Added
+
+- **tui:** Name the reactions Telegram accepts
+- **tui:** Say what an empty reaction line takes
+- **tui:** Refuse a reaction Telegram would not take
+- **tui:** Complete a shortcode on the reaction line
+
 ## [0.17.0] - 2026-11-22
 
 ### Added
