@@ -2170,3 +2170,20 @@ are in [`../AGENTS.md`](../AGENTS.md).
   rule of clearing stale anchors on bring-up is kept — a cursor, jump or retry
   from the feed that ended describes a run that is gone. A window the wire
   filled is not a resume and still follows the old path.
+
+- **Why reaction completion uses a dated static set and refuses outside it:** `+` now
+  opens the same `:shortcode` popup as the message bar, but its candidates come from
+  a fixed list of the 73 reactions Telegram accepts on the free tier (Bot API 10.5,
+  checked 2026-11-28) in `crates/tui/src/emoji.rs`, not from a
+  `messages.getAvailableReactions` call or a chat's `available_reactions`. An
+  autocomplete list does not warrant a network round trip or per-account state, and
+  custom and paid reactions stay outside it. A glyph outside the set answers
+  `That emoji is not a reaction.` in the bright status ink, keeps the typed text and
+  sends nothing; a glyph typed with U+FE0F is sent as the set's own string (`❤️`
+  sends `❤`), so the wire carries the glyph Telegram calls a reaction. The server
+  stays the authority on whether a reaction lands — this is a local answer to a
+  glyph that could never be one, not a prediction of the server's reply. The date
+  travels with the set because the enumeration ages: a glyph added after
+  2026-11-28 is refused locally until the list is updated. Nothing earlier here
+  says what a `:` line may complete, so this adds the rule rather than superseding
+  one. See [`product.md`](./product.md) and [`DESIGN.md`](../DESIGN.md).

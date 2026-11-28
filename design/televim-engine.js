@@ -65,7 +65,21 @@
   const ALL_HINTS = Object.values(HINT);
   /* reader's own text. The popup lists these; the chrome never paints the glyph. */
   const SHORTCODES = [':heart:', ':smile:', ':thinking:', ':thought_balloon:', ':thumbsup:', ':wave:'];
-  const COMP_KIND = { message: 1, reply: 1, edit: 1 };
+  /* The reaction palette: the 73 glyphs Telegram accepts as a reaction on the free
+     tier (Bot API 10.5, checked 2026-11-28), mirrored from emoji.rs. A shortcode on
+     the reaction line completes to the set's own glyph, and a typed glyph that matches
+     one once U+FE0F is dropped is submitted as that glyph. */
+  const REACTIONS = [
+    '❤', '👍', '👎', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢', '🎉',
+    '🤩', '🤮', '💩', '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳', '❤‍🔥', '🌚',
+    '🌭', '💯', '🤣', '⚡', '🍌', '🏆', '💔', '🤨', '😐', '🍓', '🍾', '💋', '🖕',
+    '😈', '😴', '😭', '🤓', '👻', '👨‍💻', '👀', '🎃', '🙈', '😇', '😨', '🤝', '✍',
+    '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿', '🆒', '💘', '🙉', '🦄', '😘',
+    '💊', '🙊', '😎', '👾', '🤷‍♂', '🤷', '🤷‍♀', '😡'
+  ];
+  /* Only the model's catalog samples that are reactions stay in the `+` popup. */
+  const SC_GLYPH = { ':heart:': '❤', ':thinking:': '🤔', ':thumbsup:': '👍' };
+  const COMP_KIND = { message: 1, reply: 1, edit: 1, react: 1 };
 
   const chars = (s) => Array.from(s).length;
 
@@ -1692,7 +1706,9 @@
     const m = upto.match(/:([A-Za-z0-9_]+)$/);
     if (!m) return null;
     const q = m[1].toLowerCase();
-    const hits = SHORTCODES.filter((sc) => sc.toLowerCase().startsWith(':' + q));
+    /* the reaction line keeps the message bar's ranking; only the pool narrows */
+    const pool = L.kind === 'react' ? SHORTCODES.filter((sc) => !!SC_GLYPH[sc]) : SHORTCODES;
+    const hits = pool.filter((sc) => sc.toLowerCase().startsWith(':' + q));
     if (!hits.length) return null;
     return { start: L.pos - m[0].length, q, hits };
   }
@@ -1708,8 +1724,10 @@
   function activeComp(L) { return L && L.comp && !L.comp.dismissed ? L.comp : null; }
   function pickComp(L) {
     const c = L.comp, word = c.hits[c.at];
-    L.buf = L.buf.slice(0, c.start) + word + L.buf.slice(L.pos);
-    L.pos = c.start + word.length;
+    /* accepting on the reaction line writes the set's glyph, not its shortcode */
+    const put = L.kind === 'react' ? SC_GLYPH[word] : word;
+    L.buf = L.buf.slice(0, c.start) + put + L.buf.slice(L.pos);
+    L.pos = c.start + put.length;
     L.comp = null;
   }
   function insKey(s, L, k) {
@@ -1821,10 +1839,15 @@
         }
         const glyph = clusters(t)[0];
         if (!glyph || !t) return refuse(s, 'Type one emoji to react.');
+        /* U+FE0F is dropped on both sides; U+200D stays, so ❤‍🔥 is not ❤. What
+           leaves is the set's own string, never the reader's lookalike. */
+        const bare = (x) => x.replace(/\uFE0F/g, '');
+        const member = REACTIONS.find((x) => bare(x) === bare(glyph));
+        if (!member) return refuse(s, 'That emoji is not a reaction.');
         const rx = m.rx || (m.rx = []);
-        const at = rx.findIndex((x) => x.k === glyph);
+        const at = rx.findIndex((x) => bare(x.k) === bare(glyph));
         if (at >= 0) { if (!rx[at].me) { rx[at].me = true; rx[at].n += 1; } }
-        else rx.push({ k: glyph, n: 1, me: true });
+        else rx.push({ k: member, n: 1, me: true });
         closeLine(s); return;
       }
       case 'find': closeLine(s); runSearch(s, buf); return;
@@ -2219,13 +2242,17 @@
     if (base === 'rtl') { const r = rows[cr[0]]; cr = [cr[0], caretCol(shown.slice(r.s, r.e), base, cr[1])]; }
     const n = Math.min(BAR_MAX, Math.max(1, rows.length));
     const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
-    return { title, shown, rows, cr, n, start, lit, prefix, conceal, base };
+    const placeholder = L && L.kind === 'react' && lit && !shown ? 'One emoji only.' : null;
+    return { title, shown, rows, cr, n, start, lit, prefix, conceal, base, placeholder };
   }
   function drawBar(g, s, b, y0) {
     const L = s.line;
     box(g, 0, y0, W, b.n + 2, b.title, b.lit);
     let lo = -1, hi = -2;
     if (L && L.mode === 'visual') { lo = Math.min(L.anchor, L.pos); hi = Math.max(L.anchor, L.pos); }
+    /* drawn before the rows so the caret lands on the first character; a space is
+       text, so only an empty line gets the note, and only the reaction prompt */
+    if (b.placeholder) put(g, 2, y0 + 1 + b.start, b.placeholder, 'd');
     const permute = b.base === 'rtl';
     const ink = (j) => {
       const ch = b.shown[j];
@@ -3513,6 +3540,7 @@
     { id: 'reactions', name: 'Reactions: the strip under a message', variants: [
       { name: 'Three chips: two readers, and a count above one', keys: '' },
       { name: 'The prompt: one emoji, or a hyphen to take yours back', keys: '+' },
+      { name: 'The popup: `:` ranks only the reactions on the reaction line', keys: '+:th' },
       { name: 'Added: a chip whose count is one, so the count is not drawn', keys: '+👏<CR>' },
       { name: 'Taken back: the count drops by one and the chip stays', keys: '+-<CR>' },
       { name: 'RTL: the strip takes the row\'s visual order', bidi: 'visual', keys: RTL_WALK + 'ljj' }] },

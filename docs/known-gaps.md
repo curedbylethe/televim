@@ -214,8 +214,10 @@ Real, and named so they are not mistaken for oversights:
   `vim-line` would run to the last character. See [`decisions.md`](./decisions.md).
 - **Three keys mean something else while a `:shortcode` completion is up.**
   `Tab`, `Enter` and `↑`/`↓` choose or accept a candidate instead of walking a
-  pane, sending the message, or moving the caret. `Esc` closes the popup and
-  gets them back, and the status line names them for as long as it is up.
+  pane, sending the message, or moving the caret. The `+` reaction line has the
+  same three: its popup ranks only the 73 reactions the free tier accepts, and
+  accepting writes the set's glyph for the next `Enter` to send. `Esc` closes
+  the popup and gets them back, and the status line names them for as long as it is up.
 - **`Ctrl-i` is `Tab` on the wire, so forward navigation carries a second key.**
   `Ctrl-i` and `Tab` are the same byte unless the terminal speaks the kitty
   keyboard protocol or `modifyOtherKeys`; crossterm then delivers `KeyCode::Tab`,
