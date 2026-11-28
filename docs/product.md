@@ -430,8 +430,11 @@ Working today:
   a painted caret that `TestBackend` can assert, which the real terminal's could
   not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
-  candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
-  keeps typing into the draft. Reply with `r`, edit with `e` — and since a
+  candidate, `⇥`/`⏎` accept one, `Esc` closes the popup and keeps the typed text,
+  and every other key keeps typing into the draft. On the `+` reaction line the
+  same popup and the same keys rank only the 73 reactions the free tier accepts;
+  accepting writes the set's glyph, which the next `Enter` sends. The message
+  bar itself keeps its full 1914-entry catalog. Reply with `r`, edit with `e` — and since a
   reply carries the message it quotes, `gd` on one goes to that message and
   `Ctrl-o` brings the reader back. `j` from the newest message rests the cursor
   on the draft's row below it, and `i` there resumes the draft in Insert with the
@@ -539,13 +542,22 @@ Working today:
   written in, the glyph before its count. `+` opens a one-line prompt titled
   `Reaction` (` ⏎: add  -: remove  Esc: cancel`) for the message under the cursor,
   and the prompt keeps that message even if the cursor moves while it is open.
-  `Enter` reads the line as one grapheme cluster — a family emoji is one glyph, a
-  flag is one glyph — so a glyph the message already carries takes this account and
-  gains one, and any other glyph starts a chip at one; a lone `-` takes this
-  account's chip down one and removes the chip at zero. A line that is empty or
-  holds two glyphs answers `Type one emoji to react.`, and a `-` on a message this
-  account has not reacted to answers `You have not reacted to this message.`; both
-  are the status line's and both leave the line open. Nothing is applied
+  A focused, empty line draws the dim `One emoji only.` with the caret in the
+  first inner column; a space is text and clears it, and `Message`, `Reply` and
+  `Edit` draw no placeholder. `:` completes against the 73 reactions Telegram
+  accepts on the free tier (Bot API 10.5, checked 2026-11-28, in
+  `crates/tui/src/emoji.rs`), ranked as the message bar ranks its catalog; `↑`/`↓`
+  move, `Tab`/`Enter` accept the set's glyph, `Esc` dismisses and leaves the typed
+  text. `Enter` reads the line as one grapheme cluster — a family emoji is one
+  glyph, a flag is one glyph — so a glyph the message already carries takes this
+  account and gains one, and any other glyph in the set starts a chip at one; a
+  lone `-` takes this account's chip down one and removes the chip at zero. A glyph
+  outside the set answers `That emoji is not a reaction.`, keeps the typed text and
+  sends nothing; a glyph typed with U+FE0F is sent as the set's own string (`❤️`
+  sends `❤`). A line that is empty or holds two glyphs answers `Type one emoji to
+  react.`, and a `-` on a message this account has not reacted to answers `You have
+  not reacted to this message.`; all are the status line's bright refusals and all
+  leave the line open. Nothing is applied
   optimistically: the strip is redrawn from the update the server sends back, so a
   chip it refused is never shown. A custom emoji and a paid reaction are drawn as
   `[emoji]` and `[paid]`, the token a caption with no picture gets, because this

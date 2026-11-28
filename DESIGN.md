@@ -87,7 +87,7 @@ change.
 | `border` | `DarkGray` | `#545862` | `#3a4150` | `#b0b5c0` | present, not attention-drawing |
 | `border-focused` | `Cyan` | `#00afaf` | `#5ad4e6` | `#1a7f8c` | the *only* thing saying where keys go |
 | `text` | `White` | `#e5e5e5` | `#d7dce5` | `#1d2128` | body |
-| `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft, a media placeholder |
+| `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft, a media placeholder, the reaction placeholder |
 | `selection` | `REVERSED` | reverse video | reverse video | reverse video | every row occupied by the cursor's item, in a read-only surface; owned by it alone |
 | `caret-insert` | — | terminal's own | `#d7dce5` | `#1d2128` | the bar, while the line is composed; on the bar's plain ground |
 | `caret-normal` | — | terminal's own | `#d7dce5` | `#1d2128` | the hollow; `text` on a plain ground, `background` on the reversed row |
@@ -614,15 +614,30 @@ message, not on its chips.
   the row is written left to right as everything else is.
 
 **The prompt is one line, and its title is `Reaction`.** `+` opens it in Insert mode,
-the bar says ` ⏎: add  -: remove  Esc: cancel`, and Enter commits.
+the bar says ` ⏎: add  -: remove  Esc: cancel`, and Enter commits. A focused, empty
+line draws `One emoji only.` in `text-dim` on the first inner column with the caret
+still there — a space is text, so the placeholder goes as soon as one is typed, and
+`Message`, `Reply` and `Edit` draw no placeholder at all.
 
 - **One emoji, or a hyphen.** The submitted text is read as one grapheme cluster, so
   a family emoji of six code points is one glyph and a flag is one glyph; a glyph the
-  message already carries takes this account and gains one, and any other glyph is a
-  new chip at one. A single `-` takes this account's chip down one and removes the
+  message already carries takes this account and gains one, and any other glyph in the
+  set is a new chip at one. A single `-` takes this account's chip down one and removes the
   chip at zero, and a message with no chip of the reader's own answers `You have not
-  reacted to this message.` Empty input answers `Type one emoji to react.` Both are the
-  status line's bright refusal, because both are answers to something the reader typed.
+  reacted to this message.` Empty input answers `Type one emoji to react.` A glyph the
+  set does not hold answers `That emoji is not a reaction.` Each is the status line's
+  bright refusal, because each is an answer to something the reader typed; the typed
+  text stays on the line and nothing is sent, so a glyph can be corrected without
+  retyping it. The lookup drops U+FE0F before it compares and sends the set's own
+  string — `❤️` submits as `❤` — so the wire carries the glyph Telegram calls a reaction.
+- **The `+` line completes against the reaction set, not the whole catalog.** `:` opens
+  the same popup the message bar uses: `↑`/`↓` move, `Tab`/`Enter` accept, `Esc` dismisses
+  and leaves the typed text, and accepting writes the set's glyph for the next `Enter`
+  to send. Ranking is the message bar's ranking, unchanged; only the pool narrows to
+  the 73 reactions Telegram accepts on the free tier (Bot API 10.5, checked 2026-11-28)
+  in `crates/tui/src/emoji.rs`, against the bar's full 1914-entry catalog. A dated static
+  list is enough for a popup: a network round trip and per-chat state would buy the
+  screen nothing, and a glyph added after that date waits for the next edit of the set.
 - **The prompt belongs to the message it opened on**, not to the cursor: the row list
   can move under an open line, so the index is taken when `+` is pressed.
 
@@ -677,7 +692,7 @@ the feature is not one this client can recognise before the server refuses.
 | State | The conversation shows |
 | :---- | :--------------------- |
 | a message with reactions, cursor elsewhere | one dim strip under the body, own chip reversed |
-| the reaction prompt open | the bar's line, titled `Reaction`, and the prompt's own hint |
+| the reaction prompt open | the bar's line, titled `Reaction`, with `One emoji only.` in `text-dim` while empty, and the prompt's own hint |
 | a pinned message | `⌖` in the margin, dim; text ink on the cursor's row |
 | `:pinned`, chat with pins | numbered rows, newest first, age right-aligned |
 | `:pinned`, chat with none | `No pinned message in this chat.`, dim |
@@ -686,14 +701,14 @@ the feature is not one this client can recognise before the server refuses.
 | `t`, message with a translation | the translation in the body, `translated to en` beneath |
 | `t`, message without one | the body unchanged, one dim sentence on the status row |
 
-Scenes: `reactions`, `pinned`, `edits` and `translated` in the engine, eighteen frames
+Scenes: `reactions`, `pinned`, `edits` and `translated` in the engine, nineteen frames
 at 80×24, in that order after the existing ones: the strip under Ada Lovelace's
-concert message, the prompt, an added emoji, one taken back, and the strip in a
-right-to-left chat in visual order; a pinned row, the pin removed, Grace Hopper's
-list, a jump from it, an empty list; the edit history, the original revision, a
-message never edited, and Noa Friedman's revisions in visual order; a translation in
-place, the original back, the premium sentence, and the translation in a
-right-to-left chat.
+concert message, the prompt, the `:shortcode` popup on the reaction line, an added
+emoji, one taken back, and the strip in a right-to-left chat in visual order; a
+pinned row, the pin removed, Grace Hopper's list, a jump from it, an empty list; the
+edit history, the original revision, a message never edited, and Noa Friedman's
+revisions in visual order; a translation in place, the original back, the premium
+sentence, and the translation in a right-to-left chat.
 
 ## Vocabulary
 
@@ -1726,7 +1741,7 @@ regressing.
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
    active search, the same way the other hints do.
-5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `New chat`, `Passphrase`, `New passphrase`,
+5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `Reaction`, `New chat`, `Passphrase`, `New passphrase`,
    `Repeat passphrase`, and the bar's own title switching between `Message to …` and ` draft `.
    The three passphrase titles are concealed: every character draws as `•`, and the text
    never appears on the bar, in the box, or in the status row.

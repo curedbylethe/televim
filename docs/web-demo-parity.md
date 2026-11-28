@@ -41,7 +41,7 @@ list manual checks where needed.
 | Confirm | Discard draft | `:discard`, then confirm | Native confirmation | simulated | `parity_core::discard_command_confirms_and_clears_the_draft` |
 | Drafts | Edit and switch chats | `i`, type, `Esc`, switch away and back | Native in-memory draft store | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |
 | Drafts | Reset | Reset button | New demo world clears drafts and local changes | browser-adapted | browser manual: reset clears state |
-| Emoji | Complete shortcode | Type `:smile`, `Tab` or `Enter` | Native popup inserts emoji into composer | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |
+| Emoji | Complete shortcode | Type `:smile`, `Tab` or `Enter` | Native popup inserts emoji into composer; on the `+` reaction line the same popup and keys rank only the 73 free-tier reactions and insert the set's glyph | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |
 | Emoji | Filter and dismiss | Type shortcode, `Up` / `Down` / `Esc` | Native popup filtering and dismissal | simulated | `tui::app::tests::a_character_keeps_filtering_and_keeps_the_popup_open`; `tui::app::tests::escape_puts_the_completion_away_and_leaves_the_draft_alone`; browser manual: emoji popup |
 | Rename | Set or clear contact name | `:rename` | Native local name action updates chat and profile | simulated | `parity_core::rename_sets_and_clears_local_name` |
 | Messaging | Send | `Enter` | Native optimistic send and deterministic simulator result | simulated | `parity_core::send_and_reply_use_fixture_state`; `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
@@ -84,6 +84,7 @@ effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
 | :--- | :--- | :--- | :--- |
 | `Update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `Edit`, `Delete`, `Forward` | Mutate fictional messages through the local simulator; text sends drain the outbox instead of an action (row “Send”) | simulated | `parity_core::send_and_reply_use_fixture_state`; `simulator::edit_delete_and_forward_mutate_world` |
+| `React` | “Reactions are unavailable in the offline demo.” The native `+` prompt, its `One emoji only.` placeholder and its restricted completion still render; no chip is applied | impossible | `simulator::unsupported_native_actions_say_why` |
 | `SendAttachment` | Browser file picker records a filename; bytes stay unread and unuploaded | browser-adapted | `simulator::selected_attachment_records_filename_without_claiming_file_bytes` |
 | `CancelUpload`, `RetryUpload`, `DismissUpload` | Cancel, retry or dismiss a local simulated upload | simulated | `simulator::cancelled_upload_retries_once_without_early_world_message`; `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
 | `FetchContact`, `FetchContacts`, `ResolveUser` | Read seeded profiles, contacts and candidates | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
