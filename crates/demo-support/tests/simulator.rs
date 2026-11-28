@@ -791,6 +791,11 @@ fn unsupported_native_actions_say_why() {
         },
         Action::Logout,
         Action::AddAccount,
+        Action::React {
+            chat_id: 1,
+            message_id: 1,
+            emoticon: Some("👍".into()),
+        },
     ] {
         let effects = sim.dispatch(&app, action);
         assert!(effects.iter().any(|effect| matches!(effect, Effect::Status(sentence) if !sentence.is_empty() && sentence != "ok") || matches!(effect, Effect::UpdateUnavailable)));
